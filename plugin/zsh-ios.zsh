@@ -305,7 +305,9 @@ _zsh_ios_handle_ambiguity() {
 
     echo ""
     echo "% Ambiguous command: \"$abbrev_str\""
-    echo "  Pick a number to save as shorthand (Enter to cancel):"
+    local cancel_hint
+    (( ${#menu_display} <= 9 )) && cancel_hint="any other key" || cancel_hint="Enter"
+    echo "  Pick a number to save as shorthand ($cancel_hint to cancel):"
     local i=1
     for item in "${menu_display[@]}"; do
         echo "    $i) $item"
@@ -314,9 +316,14 @@ _zsh_ios_handle_ambiguity() {
 
     local choice
     echo -n "  > "
-    read -r choice </dev/tty
+    if (( ${#menu_display} <= 9 )); then
+        read -r -k 1 choice </dev/tty
+        echo ""
+    else
+        read -r choice </dev/tty
+    fi
 
-    if [[ -z "$choice" ]]; then
+    if [[ -z "$choice" || "$choice" == $'\n' ]]; then
         zle reset-prompt
         return
     fi
