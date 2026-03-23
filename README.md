@@ -35,6 +35,8 @@ zsh-ios builds a **prefix trie** from your PATH executables, shell history, alia
 - **Command abbreviation** -- prefix-match any command or subcommand in your trie
 - **Path abbreviation** -- `cd Des/Fo` -> `cd Desktop/Folder`, with deep disambiguation across path components
 - **Suffix matching** -- `!` prefix matches by suffix: `cd te/!5` -> `cd tests/test-5` (matches entries ending with `5`)
+- **Contains matching** -- `*` prefix matches by substring: `cd *poll` -> `cd app-config-prod` (matches entries containing `poll`)
+- **Pipe/chain resolution** -- commands joined by `|`, `&&`, `||`, `;` are each resolved independently
 - **Context-aware argument resolution** -- commands like `cd` and `ls` resolve arguments against the filesystem (not the trie); commands like `which` and `man` resolve against executables only
 - **Deep disambiguation** -- subsequent words narrow ambiguous prefixes automatically
 - **Tab expansion** -- Tab expands to the longest common prefix, then falls through to native Zsh completion for cycling
@@ -54,7 +56,7 @@ The command trie is built from:
 1. **PATH** -- all executable files in your `$PATH`
 2. **Zsh builtins** -- `cd`, `echo`, `source`, etc.
 3. **Aliases** -- both the alias name and the commands inside the alias value (e.g., `tfa='terraform apply'` teaches `terraform -> apply`)
-4. **Shell history** -- every command from `~/.zsh_history`, split on pipes/semicolons
+4. **Shell history** -- commands from `~/.zsh_history` that correspond to known executables (typos and gone scripts are filtered out)
 5. **Zsh completions** -- subcommand patterns from completion files (e.g., `_git-checkout` -> `git checkout`)
 
 ## Installation
@@ -154,6 +156,34 @@ $ ls !.md         →  ls README.md          (ends with ".md")
 
 Suffix matching works anywhere in a path and combines freely with prefix matching. Case-insensitive fallback applies just like prefix matching.
 
+### Contains matching
+
+Prefix `*` on a path component to match by **substring**:
+
+```
+$ cd *poll        →  cd app-config-prod  (contains "poll")
+$ ls *config      →  ls app-config.yaml    (contains "config")
+```
+
+### Escaping `!` and `*`
+
+If a filename literally starts with `!` or `*`, escape with `\` to match as a prefix:
+
+```
+$ cd \!imp        →  cd !important         (literal !, not suffix mode)
+$ ls \*star       →  ls *starred           (literal *, not contains mode)
+```
+
+### Pipes and chains
+
+Each segment of a pipeline or chain is resolved independently:
+
+```
+$ gi st | gr main    →  git status | grep main
+$ cd src && ls *.rs  →  cd src && ls *.rs
+$ mak clean; mak     →  make clean; make
+```
+
 ### Self-abbreviation
 
 `zsh-ios` knows its own subcommands, so abbreviations work on it too:
@@ -171,7 +201,11 @@ Flags (words starting with `-`) are never prefix-expanded. `-H` stays `-H`, it w
 
 When you run a command, `zsh-ios` waits for it to finish. If it exits successfully (exit code 0), the command is learned into the trie. Failed commands are silently ignored, so typos and `command not found` errors won't pollute your trie.
 
-Before learning, abbreviations are resolved to their full form -- typing `gi ch main` and having it resolve to `git checkout main` means the trie learns `git checkout`, not `gi ch`.
+Before learning, abbreviations are resolved to their full form -- typing `gi ch main` and having it resolve to `git checkout main` means the trie learns `git checkout`, not `gi ch`. If resolution is ambiguous, nothing is learned at all.
+
+The trie is further protected from junk:
+- **Prefix guard** -- abbreviated prefixes like `terr` are never learned when `terraform` already exists
+- **Existence check** -- during `build`, history entries are only learned if the command is a known executable (on PATH, a builtin, or an alias)
 
 Aliases are also learned by value: if you have `alias tfa='terraform apply -auto-approve'`, the trie learns both `tfa` as a command and `terraform apply` as a subcommand path.
 
