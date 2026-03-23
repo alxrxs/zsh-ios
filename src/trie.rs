@@ -62,6 +62,14 @@ impl TrieNode {
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
     }
+
+    /// Check whether `name` is a strict prefix of any existing child.
+    /// Used to prevent learning abbreviated junk like "terr" when "terraform" exists.
+    pub fn is_prefix_of_existing(&self, name: &str) -> bool {
+        self.children
+            .keys()
+            .any(|k| k != name && k.starts_with(name))
+    }
 }
 
 /// The full command trie with serialization.
@@ -154,5 +162,17 @@ mod tests {
         assert_eq!(loaded.root.children.len(), 2);
         assert!(loaded.root.get_child("git").is_some());
         assert!(loaded.root.get_child("terraform").is_some());
+    }
+
+    #[test]
+    fn test_is_prefix_of_existing() {
+        let mut trie = CommandTrie::new();
+        trie.insert_command("terraform");
+        trie.insert_command("telnet");
+
+        assert!(trie.root.is_prefix_of_existing("terr")); // prefix of "terraform"
+        assert!(trie.root.is_prefix_of_existing("te"));   // prefix of both
+        assert!(!trie.root.is_prefix_of_existing("terraform")); // exact, not strict prefix
+        assert!(!trie.root.is_prefix_of_existing("xyz"));  // prefix of nothing
     }
 }

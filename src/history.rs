@@ -53,10 +53,18 @@ pub fn parse_history(path: &Path, trie: &mut CommandTrie) -> Result<u32, Box<dyn
             // Skip if the first word looks like an env var assignment (FOO=bar)
             if words[0].contains('=') && !words[0].starts_with('-') {
                 if words.len() > 1 {
-                    // FOO=bar command args -> insert "command args"
-                    trie.insert(&words[1..]);
-                    count += 1;
+                    let cmd = words[1];
+                    // Don't learn abbreviated prefixes (e.g. "terr" when "terraform" exists)
+                    if !trie.root.is_prefix_of_existing(cmd) {
+                        trie.insert(&words[1..]);
+                        count += 1;
+                    }
                 }
+                continue;
+            }
+
+            // Don't learn abbreviated prefixes (e.g. "terr" when "terraform" exists)
+            if trie.root.is_prefix_of_existing(words[0]) {
                 continue;
             }
 
@@ -180,6 +188,29 @@ mod tests {
 
         let git = trie.root.get_child("git").unwrap();
         assert!(git.get_child("checkout").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prefix_not_learned() {
+        // If "terraform" is already in the trie, "terr apply" should NOT
+        // insert "terr" as a separate top-level command.
+        let dir = std::env::temp_dir().join("zsh-ios-test-prefix-skip");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history");
+        std::fs::write(&path, "terr apply\n").unwrap();
+
+        let mut trie = CommandTrie::new();
+        // Pre-populate with the real command
+        trie.insert(&["terraform", "apply"]);
+
+        let count = parse_history(&path, &mut trie).unwrap();
+        assert_eq!(count, 0); // "terr" is a prefix of "terraform", so skipped
+        assert!(
+            trie.root.get_child("terr").is_none(),
+            "abbreviated prefix 'terr' should not be learned"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -247,7 +247,7 @@ fn cmd_learn(command: &str) {
 
     for segment in history::split_command_segments(&to_learn) {
         let words: Vec<&str> = segment.split_whitespace().collect();
-        if !words.is_empty() {
+        if !words.is_empty() && !trie.root.is_prefix_of_existing(words[0]) {
             trie.insert(&words);
         }
     }
