@@ -481,31 +481,24 @@ fn command_path_key(words: &[String]) -> String {
 /// fallback whole-command mode.
 fn arg_type_for_word(
     arg_position: u32,
-    _word: &str,
     prev_word: Option<&str>,
     spec: Option<&ArgSpec>,
     fallback: ArgMode,
 ) -> ArgMode {
-    // Check if this word is the value of a flag from the previous word
-    if let Some(prev) = prev_word
-        && prev.starts_with('-')
-            && let Some(spec) = spec {
-                if let Some(&flag_type) = spec.flag_args.get(prev) {
-                    return u8_to_arg_mode(flag_type);
-                }
-                // Also check long flag with = stripped (--output= was stored as --output)
-                let stripped = prev.trim_end_matches('=');
-                if stripped != prev
-                    && let Some(&flag_type) = spec.flag_args.get(stripped) {
-                        return u8_to_arg_mode(flag_type);
-                    }
-            }
+    if let Some(spec) = spec {
+        // Check if this word is the value of a flag from the previous word
+        if let Some(prev) = prev_word
+            && prev.starts_with('-')
+            && let Some(flag_type) = spec.type_after_flag(prev)
+        {
+            return u8_to_arg_mode(flag_type);
+        }
 
-    // Check per-position spec
-    if let Some(spec) = spec
-        && let Some(pos_type) = spec.type_at(arg_position) {
+        // Check per-position spec
+        if let Some(pos_type) = spec.type_at(arg_position) {
             return u8_to_arg_mode(pos_type);
         }
+    }
 
     // Fall back to whole-command mode
     fallback
@@ -539,7 +532,7 @@ fn resolve_paths_in_words(words: &[String], spec: Option<&ArgSpec>, fallback_mod
 
         arg_position += 1;
         let prev_word = if i > 0 { Some(words[i - 1].as_str()) } else { None };
-        let mode = arg_type_for_word(arg_position, word, prev_word, spec, fallback_mode);
+        let mode = arg_type_for_word(arg_position, prev_word, spec, fallback_mode);
 
         // Decide whether to resolve this word as a path
         let should_resolve = mode != ArgMode::ExecsOnly

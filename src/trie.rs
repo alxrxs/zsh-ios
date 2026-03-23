@@ -57,12 +57,6 @@ impl TrieNode {
         self.children.len()
     }
 
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.children.is_empty()
-    }
-
     /// Check whether `name` is a strict prefix of any existing child.
     /// Used to prevent learning abbreviated junk like "terr" when "terraform" exists.
     pub fn is_prefix_of_existing(&self, name: &str) -> bool {
@@ -73,9 +67,7 @@ impl TrieNode {
 }
 
 /// Argument type constants for positions and flags.
-/// 0 = Normal (trie), 1 = Paths, 2 = DirsOnly, 3 = ExecsOnly
-#[allow(dead_code)]
-pub const ARG_MODE_NORMAL: u8 = 0;
+/// 1 = Paths, 2 = DirsOnly, 3 = ExecsOnly (0 = Normal, implicit default)
 pub const ARG_MODE_PATHS: u8 = 1;
 pub const ARG_MODE_DIRS_ONLY: u8 = 2;
 pub const ARG_MODE_EXECS_ONLY: u8 = 3;
@@ -103,9 +95,16 @@ impl ArgSpec {
     }
 
     /// Get the argument type expected after a flag.
-    #[allow(dead_code)]
+    /// Also checks the flag with trailing `=` stripped (e.g., `--output=` → `--output`).
     pub fn type_after_flag(&self, flag: &str) -> Option<u8> {
-        self.flag_args.get(flag).copied()
+        if let Some(&t) = self.flag_args.get(flag) {
+            return Some(t);
+        }
+        let stripped = flag.trim_end_matches('=');
+        if stripped != flag {
+            return self.flag_args.get(stripped).copied();
+        }
+        None
     }
 
     /// Convenience: is this spec non-empty?

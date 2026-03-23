@@ -206,7 +206,55 @@ fn parse_arg_spec(content: &str) -> ArgSpec {
         }
     }
 
+    // Fallback: if we found no structured specs, scan for bare action calls
+    // to at least set the rest/default mode.
+    if spec.is_empty()
+        && let Some(mode) = detect_dominant_action(content)
+    {
+        spec.rest = Some(mode);
+    }
+
     spec
+}
+
+/// Scan a completion file for the dominant action when no structured
+/// _arguments specs were found. Returns the most common action type.
+fn detect_dominant_action(content: &str) -> Option<u8> {
+    let mut has_files = false;
+    let mut has_dirs = false;
+    let mut has_execs = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.contains("_directories")
+            || (trimmed.contains("_path_files") && trimmed.contains("-/"))
+            || trimmed.contains("_files -/")
+        {
+            has_dirs = true;
+        }
+        if trimmed.contains("_files") && !trimmed.contains("-/") {
+            has_files = true;
+        }
+        if trimmed.contains("_command_names")
+            || trimmed.contains("_path_commands")
+            || trimmed.contains(":_commands")
+        {
+            has_execs = true;
+        }
+    }
+
+    if has_execs && !has_files && !has_dirs {
+        Some(trie::ARG_MODE_EXECS_ONLY)
+    } else if has_dirs && !has_files {
+        Some(trie::ARG_MODE_DIRS_ONLY)
+    } else if has_files || has_dirs {
+        Some(trie::ARG_MODE_PATHS)
+    } else {
+        None
+    }
 }
 
 /// Extract argument spec strings from a line.
