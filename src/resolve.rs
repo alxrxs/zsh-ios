@@ -447,11 +447,31 @@ enum PathsResult {
 }
 
 /// After command resolution, resolve any path arguments against the filesystem.
+/// Check whether a word looks like an explicit path reference.
+/// Used in Normal mode to avoid resolving bare words like "clau" against
+/// the filesystem -- only words that syntactically reference a path.
+fn looks_like_path(word: &str) -> bool {
+    word.contains('/')
+        || word.starts_with('~')
+        || word.starts_with('.')
+        || word.starts_with('!')
+        || word.starts_with('*')
+        || word.starts_with("\\!")
+        || word.starts_with("\\*")
+}
+
 fn resolve_paths_in_words(words: &[String], mode: ArgMode) -> PathsResult {
     let mut result: Vec<String> = Vec::new();
     for (i, word) in words.iter().enumerate() {
         // Skip path resolution for exec-only commands (which, man, etc.)
-        if i > 0 && !word.starts_with('-') && mode != ArgMode::ExecsOnly {
+        // In Normal mode, only resolve words that look like explicit paths --
+        // bare words like "clau" should not be expanded to "CLAUDE.md".
+        // In Paths/DirsOnly mode, resolve everything (the user asked for a path command).
+        let should_resolve = i > 0
+            && !word.starts_with('-')
+            && mode != ArgMode::ExecsOnly
+            && (mode == ArgMode::Paths || mode == ArgMode::DirsOnly || looks_like_path(word));
+        if should_resolve {
             let path_result = match mode {
                 ArgMode::DirsOnly => path_resolve::resolve_path_dirs_only(word),
                 _ => path_resolve::resolve_path(word),
