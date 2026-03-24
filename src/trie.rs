@@ -20,7 +20,12 @@ impl TrieNode {
         }
         let child = self.children.entry(words[0].to_string()).or_default();
         child.count += 1;
-        child.is_leaf = true;
+        // Only mark as leaf if this is the terminal word in the sequence.
+        // Intermediate nodes get is_leaf from insert_command() or from being
+        // the terminal word in a different insertion.
+        if words.len() == 1 {
+            child.is_leaf = true;
+        }
         if words.len() > 1 {
             child.insert(&words[1..]);
         }
@@ -39,9 +44,11 @@ impl TrieNode {
         if prefix.is_empty() {
             return self.children.iter().map(|(k, v)| (k.as_str(), v)).collect();
         }
+        // Use BTreeMap range for O(log n + m) lookup instead of O(n) full scan
+        let start = prefix.to_string();
         self.children
-            .iter()
-            .filter(|(k, _)| k.starts_with(prefix))
+            .range(start..)
+            .take_while(|(k, _)| k.starts_with(prefix))
             .map(|(k, v)| (k.as_str(), v))
             .collect()
     }
@@ -54,6 +61,11 @@ impl TrieNode {
     /// Total number of distinct first-level entries.
     pub fn len(&self) -> usize {
         self.children.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
     }
 
     /// Check whether `name` is a strict prefix of any existing child.

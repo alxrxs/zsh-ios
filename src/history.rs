@@ -141,8 +141,14 @@ pub fn split_command_segments(line: &str) -> Vec<&str> {
                     }
                     i += 1;
                     start = i + 1;
+                } else {
+                    // Single & (background) — split here too
+                    let seg = line[start..i].trim();
+                    if !seg.is_empty() {
+                        segments.push(seg);
+                    }
+                    start = i + 1;
                 }
-                // Single & (background) — end of this command
             }
             _ => {}
         }
@@ -184,6 +190,9 @@ mod tests {
 
         let segs = split_command_segments("git status; git diff");
         assert_eq!(segs, vec!["git status", "git diff"]);
+
+        let segs = split_command_segments("sleep 5 & echo done");
+        assert_eq!(segs, vec!["sleep 5", "echo done"]);
     }
 
     #[test]

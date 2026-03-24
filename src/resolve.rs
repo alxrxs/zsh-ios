@@ -108,6 +108,8 @@ pub fn resolve_line(input: &str, trie: &CommandTrie, pins: &Pins) -> ResolveResu
         }
     }
 
+    // Note: resolved.join(" ") normalises whitespace (e.g., double-spaces
+    // become single-space). This is intentional — shells split on whitespace.
     let result = resolved.join(" ");
     if any_changed && result != input {
         ResolveResult::Resolved(result)
@@ -553,6 +555,7 @@ fn resolve_paths_in_words(
 ) -> PathsResult {
     let mut result: Vec<String> = Vec::new();
     let mut arg_position: u32 = 0; // 1-indexed position of non-flag arguments after the command prefix
+    let mut next_is_flag_value = false; // true when prev word was a flag that consumes a typed value
 
     for (i, word) in words.iter().enumerate() {
         // Skip command prefix words (e.g., "git" or "git add")
@@ -563,10 +566,17 @@ fn resolve_paths_in_words(
 
         if word.starts_with('-') {
             result.push(word.clone());
+            // Check if this flag consumes the next word as a typed value
+            next_is_flag_value = spec.and_then(|s| s.type_after_flag(word)).is_some();
             continue;
         }
 
-        arg_position += 1;
+        // If this word is a flag's value, don't count it as a positional argument
+        if next_is_flag_value {
+            next_is_flag_value = false;
+        } else {
+            arg_position += 1;
+        }
         let prev_word = if i > 0 {
             Some(words[i - 1].as_str())
         } else {
@@ -679,57 +689,27 @@ enum ArgMode {
     Runtime(u8),
 }
 
+/// Commands whose arguments are directory paths (cd, pushd).
+const DIR_COMMANDS: &[&str] = &["cd", "pushd"];
+
+/// Commands whose arguments are filesystem paths (files and/or directories).
+const PATH_COMMANDS: &[&str] = &[
+    "ls", "rm", "rmdir", "mkdir", "cp", "mv", "ln", "cat", "less", "more", "head", "tail", "wc",
+    "touch", "chmod", "chown", "chgrp", "stat", "file", "readlink", "realpath", "basename",
+    "dirname", "du", "find", "diff", "patch", "tar", "zip", "unzip", "gzip", "gunzip", "bzip2",
+    "xz", "source", "open", "nano", "vim", "vi", "nvim", "emacs", "code", "bat",
+];
+
+/// Commands whose arguments are executable / command names.
+const EXEC_COMMANDS: &[&str] = &[
+    "which", "type", "whence", "where", "command", "man", "rehash",
+];
+
 /// Returns true for commands that are hardcoded as file/dir/exec-only —
 /// these always skip trie resolution for their arguments regardless of
 /// whether the trie node happens to have learned entries.
 fn is_hardcoded_path_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "cd" | "pushd"
-            | "ls"
-            | "rm"
-            | "rmdir"
-            | "mkdir"
-            | "cp"
-            | "mv"
-            | "ln"
-            | "cat"
-            | "less"
-            | "more"
-            | "head"
-            | "tail"
-            | "wc"
-            | "touch"
-            | "chmod"
-            | "chown"
-            | "chgrp"
-            | "stat"
-            | "file"
-            | "readlink"
-            | "realpath"
-            | "basename"
-            | "dirname"
-            | "du"
-            | "find"
-            | "diff"
-            | "patch"
-            | "tar"
-            | "zip"
-            | "unzip"
-            | "gzip"
-            | "gunzip"
-            | "bzip2"
-            | "xz"
-            | "source"
-            | "open"
-            | "nano"
-            | "vim"
-            | "vi"
-            | "nvim"
-            | "emacs"
-            | "code"
-            | "bat"
-    )
+    DIR_COMMANDS.contains(&cmd) || PATH_COMMANDS.contains(&cmd)
 }
 
 /// Classify a command by how its arguments should be resolved.
@@ -751,18 +731,14 @@ fn arg_mode(cmd: &str, modes: &ArgModeMap) -> ArgMode {
     }
 
     // Hardcoded fallback for commands without Zsh completions
-    match cmd {
-        "cd" | "pushd" => ArgMode::DirsOnly,
-
-        "ls" | "rm" | "rmdir" | "mkdir" | "cp" | "mv" | "ln" | "cat" | "less" | "more" | "head"
-        | "tail" | "wc" | "touch" | "chmod" | "chown" | "chgrp" | "stat" | "file" | "readlink"
-        | "realpath" | "basename" | "dirname" | "du" | "find" | "diff" | "patch" | "tar"
-        | "zip" | "unzip" | "gzip" | "gunzip" | "bzip2" | "xz" | "source" | "open" | "nano"
-        | "vim" | "vi" | "nvim" | "emacs" | "code" | "bat" => ArgMode::Paths,
-
-        "which" | "type" | "whence" | "where" | "command" | "man" | "rehash" => ArgMode::ExecsOnly,
-
-        _ => ArgMode::Normal,
+    if DIR_COMMANDS.contains(&cmd) {
+        ArgMode::DirsOnly
+    } else if PATH_COMMANDS.contains(&cmd) {
+        ArgMode::Paths
+    } else if EXEC_COMMANDS.contains(&cmd) {
+        ArgMode::ExecsOnly
+    } else {
+        ArgMode::Normal
     }
 }
 

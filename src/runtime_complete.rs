@@ -1,41 +1,16 @@
-//! Runtime completion resolvers for expanded argument types.
-//!
-//! Each resolver queries the system at resolve-time and returns matching
-//! entries for a given prefix. Used both for abbreviation resolution and
-//! for `?` key completions.
-
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::sync::Mutex;
+use std::sync::LazyLock;
 
-/// Cached results for expensive lookups.
-static CACHE: Mutex<Option<ResolverCache>> = Mutex::new(None);
-
-struct ResolverCache {
-    signals: Vec<String>,
-    ports: HashMap<String, u16>,
-    users: Vec<String>,
-    groups: Vec<String>,
-    hosts: Vec<String>,
-    net_ifaces: Vec<String>,
-    locales: Vec<String>,
-}
-
-fn get_or_init_cache() -> std::sync::MutexGuard<'static, Option<ResolverCache>> {
-    let mut guard = CACHE.lock().unwrap();
-    if guard.is_none() {
-        *guard = Some(ResolverCache {
-            signals: load_signals(),
-            ports: load_ports(),
-            users: load_users(),
-            groups: load_groups(),
-            hosts: load_hosts(),
-            net_ifaces: load_net_ifaces(),
-            locales: load_locales(),
-        });
-    }
-    guard
-}
+/// Each resource initializes independently on first access — no upfront cost,
+/// no mutex contention, and no risk of poisoned-mutex panics.
+static SIGNALS: LazyLock<Vec<String>> = LazyLock::new(load_signals);
+static PORTS: LazyLock<HashMap<String, u16>> = LazyLock::new(load_ports);
+static USERS: LazyLock<Vec<String>> = LazyLock::new(load_users);
+static GROUPS: LazyLock<Vec<String>> = LazyLock::new(load_groups);
+static HOSTS: LazyLock<Vec<String>> = LazyLock::new(load_hosts);
+static NET_IFACES: LazyLock<Vec<String>> = LazyLock::new(load_net_ifaces);
+static LOCALES: LazyLock<Vec<String>> = LazyLock::new(load_locales);
 
 // --- Signal names (hardcoded, portable) ---
 
@@ -122,7 +97,7 @@ fn load_groups() -> Vec<String> {
     groups
 }
 
-// --- Hosts from /etc/hosts + ~/.ssh/known_hosts ---
+// --- Hosts from /etc/hosts + ~/.ssh/known_hosts + ~/.ssh/config ---
 
 fn load_hosts() -> Vec<String> {
     let mut hosts = Vec::new();
@@ -140,8 +115,8 @@ fn load_hosts() -> Vec<String> {
             }
         }
     }
-    // ~/.ssh/known_hosts
     if let Some(home) = dirs::home_dir() {
+        // ~/.ssh/known_hosts
         let kh = home.join(".ssh/known_hosts");
         if let Ok(file) = std::fs::File::open(kh) {
             for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
@@ -156,6 +131,30 @@ fn load_hosts() -> Vec<String> {
                         if !host.is_empty() {
                             hosts.push(host.to_string());
                         }
+                    }
+                }
+            }
+        }
+        // ~/.ssh/config — Host aliases
+        let cfg = home.join(".ssh/config");
+        if let Ok(file) = std::fs::File::open(cfg) {
+            for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                // Match "Host alias1 alias2 ..." (case-insensitive keyword)
+                if let Some(rest) = trimmed.strip_prefix("Host ")
+                    .or_else(|| trimmed.strip_prefix("Host\t"))
+                    .or_else(|| trimmed.strip_prefix("host "))
+                    .or_else(|| trimmed.strip_prefix("host\t"))
+                {
+                    for alias in rest.split_whitespace() {
+                        // Skip wildcard patterns (*, ?, !negations)
+                        if alias.contains('*') || alias.contains('?') || alias.starts_with('!') {
+                            continue;
+                        }
+                        hosts.push(alias.to_string());
                     }
                 }
             }
@@ -264,11 +263,9 @@ pub fn list_matches(arg_type: u8, prefix: &str) -> Vec<String> {
 
     match arg_type {
         trie::ARG_MODE_SIGNALS => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
             // Signals: match with or without SIG prefix
             let stripped = prefix.strip_prefix("SIG").unwrap_or(prefix);
-            c.signals
+            SIGNALS
                 .iter()
                 .filter(|s| {
                     s.starts_with(stripped)
@@ -277,60 +274,36 @@ pub fn list_matches(arg_type: u8, prefix: &str) -> Vec<String> {
                 .cloned()
                 .collect()
         }
-        trie::ARG_MODE_PORTS => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
-            c.ports
-                .keys()
-                .filter(|k| k.starts_with(prefix) || k.to_lowercase().starts_with(&prefix_lower))
-                .cloned()
-                .collect()
-        }
-        trie::ARG_MODE_USERS => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
-            c.users
-                .iter()
-                .filter(|u| u.starts_with(prefix) || u.to_lowercase().starts_with(&prefix_lower))
-                .cloned()
-                .collect()
-        }
-        trie::ARG_MODE_GROUPS => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
-            c.groups
-                .iter()
-                .filter(|g| g.starts_with(prefix) || g.to_lowercase().starts_with(&prefix_lower))
-                .cloned()
-                .collect()
-        }
-        trie::ARG_MODE_HOSTS => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
-            c.hosts
-                .iter()
-                .filter(|h| h.starts_with(prefix) || h.to_lowercase().starts_with(&prefix_lower))
-                .cloned()
-                .collect()
-        }
-        trie::ARG_MODE_NET_IFACES => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
-            c.net_ifaces
-                .iter()
-                .filter(|i| i.starts_with(prefix))
-                .cloned()
-                .collect()
-        }
-        trie::ARG_MODE_LOCALES => {
-            let cache = get_or_init_cache();
-            let c = cache.as_ref().unwrap();
-            c.locales
-                .iter()
-                .filter(|l| l.starts_with(prefix) || l.to_lowercase().starts_with(&prefix_lower))
-                .cloned()
-                .collect()
-        }
+        trie::ARG_MODE_PORTS => PORTS
+            .keys()
+            .filter(|k| k.starts_with(prefix) || k.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect(),
+        trie::ARG_MODE_USERS => USERS
+            .iter()
+            .filter(|u| u.starts_with(prefix) || u.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect(),
+        trie::ARG_MODE_GROUPS => GROUPS
+            .iter()
+            .filter(|g| g.starts_with(prefix) || g.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect(),
+        trie::ARG_MODE_HOSTS => HOSTS
+            .iter()
+            .filter(|h| h.starts_with(prefix) || h.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect(),
+        trie::ARG_MODE_NET_IFACES => NET_IFACES
+            .iter()
+            .filter(|i| i.starts_with(prefix))
+            .cloned()
+            .collect(),
+        trie::ARG_MODE_LOCALES => LOCALES
+            .iter()
+            .filter(|l| l.starts_with(prefix) || l.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect(),
         trie::ARG_MODE_GIT_BRANCHES => git_branches()
             .into_iter()
             .filter(|b| b.starts_with(prefix) || b.to_lowercase().starts_with(&prefix_lower))

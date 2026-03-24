@@ -22,7 +22,13 @@ _zsh_ios_build_if_stale() {
         rebuild=1
     else
         local now=$(date +%s)
-        local mtime=$(stat -f %m "$tree_file" 2>/dev/null || echo 0)
+        # Cross-platform mtime: macOS uses stat -f, Linux uses stat -c
+        local mtime
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            mtime=$(stat -f %m "$tree_file" 2>/dev/null || echo 0)
+        else
+            mtime=$(stat -c %Y "$tree_file" 2>/dev/null || echo 0)
+        fi
         if (( now - mtime > 3600 )); then
             rebuild=1
         fi
@@ -40,8 +46,13 @@ _zsh_ios_preexec() {
     _zsh_ios_pending_cmd="$1"
 }
 
+# Capture exit code before any other precmd hook can modify it.
+_zsh_ios_save_retval() {
+    _zsh_ios_retval=$?
+}
+
 _zsh_ios_precmd() {
-    local ec=$?
+    local ec=${_zsh_ios_retval:-0}
     if [[ $ec -eq 0 && -n "$_zsh_ios_pending_cmd" ]]; then
         ("$ZSH_IOS_BIN" learn -- "$_zsh_ios_pending_cmd" &>/dev/null &)
     fi
@@ -52,6 +63,18 @@ _zsh_ios_precmd() {
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _zsh_ios_preexec
 add-zsh-hook precmd _zsh_ios_precmd
+# Ensure retval capture runs FIRST (before all other precmd hooks)
+precmd_functions=(_zsh_ios_save_retval "${(@)precmd_functions:#_zsh_ios_save_retval}")
+
+# --- Safe eval: validates output contains only expected _zio_ assignments ---
+_zsh_ios_safe_eval() {
+    local line
+    while IFS= read -r line; do
+        # Allow empty lines and lines starting with expected variable names
+        [[ -z "$line" || "$line" == _zio_* ]] || return 1
+    done <<< "$1"
+    eval "$1"
+}
 
 # --- Check if disabled (file-based toggle via `zsh-ios toggle`) ---
 _zsh_ios_is_disabled() {
@@ -147,7 +170,7 @@ _zsh_ios_expand_or_complete() {
             # Ambiguous -- parse shell vars from Rust output
             local _zio_word _zio_lcp _zio_position _zio_resolved_prefix _zio_remaining
             local -a _zio_candidates _zio_deep_display _zio_deep_items
-            eval "$output"
+            _zsh_ios_safe_eval "$output"
 
             # Expand buffer to LCP if longer than what was typed
             if [[ -n "$_zio_lcp" && "$_zio_lcp" != "$_zio_word" ]]; then
@@ -181,7 +204,7 @@ _zsh_ios_expand_or_complete() {
 # --- Path ambiguity handler: single-keypress selection ---
 _zsh_ios_handle_path_ambiguity() {
     local -a _zio_path_candidates
-    eval "$1"
+    _zsh_ios_safe_eval "$1"
     local mode="$2"  # "accept" or "expand"
 
     local count=${#_zio_path_candidates}
@@ -262,7 +285,7 @@ _zsh_ios_help() {
 _zsh_ios_handle_ambiguity() {
     local _zio_word _zio_lcp _zio_position _zio_resolved_prefix _zio_remaining _zio_pins_path
     local -a _zio_candidates _zio_deep_display _zio_deep_items
-    eval "$1"
+    _zsh_ios_safe_eval "$1"
 
     zle -I
 

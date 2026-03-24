@@ -49,9 +49,11 @@ fi
 
 # 3. Remove source line from .zshrc
 if [[ -f "$ZSHRC" ]]; then
-    if grep -qF "zsh-ios" "$ZSHRC"; then
+    if grep -qF "zsh-ios.zsh" "$ZSHRC"; then
         cp "$ZSHRC" "$ZSHRC.bak-zsh-ios"
-        grep -vF "zsh-ios" "$ZSHRC" > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
+        # Only remove the source line and the installer comment — not arbitrary
+        # lines that happen to mention "zsh-ios"
+        sed -e '/^# zsh-ios: /d' -e '/zsh-ios\.zsh/d' "$ZSHRC" > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
         echo ""
         echo "Removed zsh-ios lines from $ZSHRC (backup: $ZSHRC.bak-zsh-ios)"
     else

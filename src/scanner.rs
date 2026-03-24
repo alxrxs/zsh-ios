@@ -25,7 +25,9 @@ pub fn scan_path(trie: &mut CommandTrie) -> u32 {
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
-            if !meta.is_file() && !meta.file_type().is_symlink() {
+            // entry.metadata() follows symlinks — symlinks to executable files
+            // are caught by is_file(); broken symlinks fail at metadata() above.
+            if !meta.is_file() {
                 continue;
             }
             if meta.permissions().mode() & 0o111 == 0 {
