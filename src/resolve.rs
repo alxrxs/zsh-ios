@@ -440,7 +440,32 @@ fn split_on_operators(input: &str) -> Vec<LinePart> {
     parts
 }
 
-fn finalize_with_paths(input: &str, words: Vec<String>, trie: &CommandTrie) -> ResolveResult {
+fn finalize_with_paths(input: &str, mut words: Vec<String>, trie: &CommandTrie) -> ResolveResult {
+    // If the command word itself is a relative/absolute path (e.g. `./unin`,
+    // `~/bin/foo`), resolve it against the filesystem before handling args.
+    if let Some(cmd) = words.first() {
+        if (cmd.contains('/') || cmd.starts_with('~')) && !cmd.starts_with('-') {
+            match path_resolve::resolve_path(cmd) {
+                path_resolve::PathResult::Resolved(resolved) => {
+                    words[0] = shell_escape_path(&resolved);
+                }
+                path_resolve::PathResult::Ambiguous(candidates) => {
+                    let suffix: Vec<String> = words[1..].to_vec();
+                    let full_cmds: Vec<String> = candidates
+                        .into_iter()
+                        .map(|c| {
+                            let mut parts = vec![shell_escape_path(&c)];
+                            parts.extend(suffix.clone());
+                            parts.join(" ")
+                        })
+                        .collect();
+                    return ResolveResult::PathAmbiguous(full_cmds);
+                }
+                path_resolve::PathResult::Unchanged => {}
+            }
+        }
+    }
+
     // Look up per-position ArgSpec: try "cmd subcmd" first, then "cmd"
     let (spec, cmd_words) = lookup_arg_spec(&words, &trie.arg_specs);
     let fallback_mode = words
