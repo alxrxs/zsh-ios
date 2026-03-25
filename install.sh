@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/zsh-ios"
+_config_base="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_DIR="${_config_base%/}/zsh-ios"
 
 echo "=== zsh-ios installer ==="
 echo ""

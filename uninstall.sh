@@ -24,7 +24,8 @@ declare -a config_dirs=()
 [[ -d "$HOME/Library/Application Support/zsh-ios" ]] && config_dirs+=("$HOME/Library/Application Support/zsh-ios")
 
 # XDG config dir (if different)
-xdg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/zsh-ios"
+xdg_base="${XDG_CONFIG_HOME:-$HOME/.config}"
+xdg_dir="${xdg_base%/}/zsh-ios"
 if [[ -d "$xdg_dir" ]] && [[ "$xdg_dir" != "$HOME/Library/Application Support/zsh-ios" ]]; then
     config_dirs+=("$xdg_dir")
 fi
