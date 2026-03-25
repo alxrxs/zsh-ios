@@ -1959,4 +1959,240 @@ _arguments \
         assert_eq!(chown.positional.get(&1), Some(&trie::ARG_MODE_USERS));
         assert_eq!(chown.rest, Some(trie::ARG_MODE_PATHS));
     }
+
+    // --- Tests for extract_desc_entries ---
+
+    #[test]
+    fn test_extract_desc_entries_basic() {
+        let mut result = HashMap::new();
+        extract_desc_entries("add:'Add file contents to index'", "git", &mut result);
+        let git = result.get("git").unwrap();
+        assert_eq!(git.get("add").unwrap(), "Add file contents to index");
+    }
+
+    #[test]
+    fn test_extract_desc_entries_multiple() {
+        let mut result = HashMap::new();
+        extract_desc_entries(
+            "add:'Add file contents' commit:'Record changes'",
+            "git",
+            &mut result,
+        );
+        let git = result.get("git").unwrap();
+        assert_eq!(git.len(), 2);
+        assert_eq!(git.get("add").unwrap(), "Add file contents");
+        assert_eq!(git.get("commit").unwrap(), "Record changes");
+    }
+
+    #[test]
+    fn test_extract_desc_entries_hyphenated_command() {
+        let mut result = HashMap::new();
+        extract_desc_entries("cherry-pick:'Apply changes'", "git", &mut result);
+        let git = result.get("git").unwrap();
+        assert_eq!(git.get("cherry-pick").unwrap(), "Apply changes");
+    }
+
+    #[test]
+    fn test_extract_desc_entries_empty_desc_skipped() {
+        let mut result = HashMap::new();
+        extract_desc_entries("add:''", "git", &mut result);
+        // Empty description should be skipped
+        assert!(result.get("git").is_none());
+    }
+
+    #[test]
+    fn test_extract_desc_entries_no_colon_quote() {
+        let mut result = HashMap::new();
+        extract_desc_entries("just a plain word", "git", &mut result);
+        assert!(result.is_empty());
+    }
+
+    // --- Tests for extract_descriptions_from_content ---
+
+    #[test]
+    fn test_extract_descriptions_basic_array() {
+        let content = r#"
+commands=(
+  add:'Add file contents to index'
+  commit:'Record changes to repository'
+)
+"#;
+        let result = extract_descriptions_from_content(content, "git");
+        let git = result.get("git").unwrap();
+        assert_eq!(git.len(), 2);
+        assert_eq!(git.get("add").unwrap(), "Add file contents to index");
+        assert_eq!(git.get("commit").unwrap(), "Record changes to repository");
+    }
+
+    #[test]
+    fn test_extract_descriptions_hyphenated_cmd() {
+        // _git-stash should derive parent "git stash"
+        let content = r#"
+subcmds=(
+  apply:'Apply a stash'
+  pop:'Pop a stash'
+)
+"#;
+        let result = extract_descriptions_from_content(content, "git-stash");
+        let parent = result.get("git stash").unwrap();
+        assert_eq!(parent.len(), 2);
+        assert_eq!(parent.get("apply").unwrap(), "Apply a stash");
+    }
+
+    #[test]
+    fn test_extract_descriptions_inline_with_paren() {
+        // Entries on the same line as =(
+        let content = "commands=(add:'Add files' commit:'Record changes')\n";
+        let result = extract_descriptions_from_content(content, "git");
+        let git = result.get("git").unwrap();
+        assert_eq!(git.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_descriptions_entries_before_close() {
+        // Entries on the same line as closing )
+        let content = "commands=(\n  add:'Add files'\n  commit:'Record changes')\n";
+        let result = extract_descriptions_from_content(content, "git");
+        let git = result.get("git").unwrap();
+        assert_eq!(git.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_descriptions_no_arrays() {
+        let content = "just some random code\nno arrays here\n";
+        let result = extract_descriptions_from_content(content, "foo");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_descriptions_comment_line_skipped() {
+        let content = "# commands=(\nreal_var=(\n  add:'Add files'\n)\n";
+        let result = extract_descriptions_from_content(content, "git");
+        let git = result.get("git").unwrap();
+        assert_eq!(git.len(), 1);
+    }
+
+    // --- Tests for extract_case_arm_name ---
+
+    #[test]
+    fn test_extract_case_arm_name_parenthesized() {
+        assert_eq!(extract_case_arm_name("  (files)"), Some("files".into()));
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_bare() {
+        assert_eq!(extract_case_arm_name("  files)"), Some("files".into()));
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_with_hyphens() {
+        assert_eq!(
+            extract_case_arm_name("  (remote-tracking)"),
+            Some("remote-tracking".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_wildcard_rejected() {
+        assert_eq!(extract_case_arm_name("  (*)"), None);
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_or_pattern_rejected() {
+        assert_eq!(extract_case_arm_name("  (a|b)"), None);
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_space_rejected() {
+        assert_eq!(extract_case_arm_name("  (a b)"), None);
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_no_paren() {
+        assert_eq!(extract_case_arm_name("  files"), None);
+    }
+
+    #[test]
+    fn test_extract_case_arm_name_empty_inner() {
+        assert_eq!(extract_case_arm_name("  ()"), None);
+    }
+
+    // --- Tests for detect_type_in_block ---
+
+    #[test]
+    fn test_detect_type_files() {
+        assert_eq!(
+            detect_type_in_block("  _files\n"),
+            Some(trie::ARG_MODE_PATHS)
+        );
+    }
+
+    #[test]
+    fn test_detect_type_directories() {
+        assert_eq!(
+            detect_type_in_block("  _directories\n"),
+            Some(trie::ARG_MODE_DIRS_ONLY)
+        );
+    }
+
+    #[test]
+    fn test_detect_type_dirs_slash() {
+        assert_eq!(
+            detect_type_in_block("  _path_files -/\n"),
+            Some(trie::ARG_MODE_DIRS_ONLY)
+        );
+        assert_eq!(
+            detect_type_in_block("  _files -/\n"),
+            Some(trie::ARG_MODE_DIRS_ONLY)
+        );
+    }
+
+    #[test]
+    fn test_detect_type_execs() {
+        assert_eq!(
+            detect_type_in_block("  _command_names\n"),
+            Some(trie::ARG_MODE_EXECS_ONLY)
+        );
+        assert_eq!(
+            detect_type_in_block("  _path_commands\n"),
+            Some(trie::ARG_MODE_EXECS_ONLY)
+        );
+    }
+
+    #[test]
+    fn test_detect_type_files_and_dirs() {
+        // When both files and dirs present → Paths
+        assert_eq!(
+            detect_type_in_block("  _files\n  _directories\n"),
+            Some(trie::ARG_MODE_PATHS)
+        );
+    }
+
+    #[test]
+    fn test_detect_type_comment_ignored() {
+        assert_eq!(
+            detect_type_in_block("  # _files\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_type_empty() {
+        assert_eq!(detect_type_in_block(""), None);
+    }
+
+    // --- Tests for is_internal_completion ---
+
+    #[test]
+    fn test_is_internal_completion() {
+        assert!(is_internal_completion("arguments"));
+        assert!(is_internal_completion("values"));
+        assert!(is_internal_completion("files"));
+        assert!(is_internal_completion("path_files"));
+        assert!(is_internal_completion("command_names"));
+        assert!(is_internal_completion("regex_arguments"));
+        assert!(!is_internal_completion("git"));
+        assert!(!is_internal_completion("docker"));
+        assert!(!is_internal_completion("ssh"));
+    }
 }

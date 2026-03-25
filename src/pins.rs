@@ -161,4 +161,96 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_append_and_load() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-pins-append");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("pins.txt");
+
+        Pins::append(&path, &["g", "ch"], &["git", "checkout"]).unwrap();
+        Pins::append(&path, &["tf"], &["terraform"]).unwrap();
+
+        let pins = Pins::load(&path);
+        assert_eq!(pins.entries.len(), 2);
+        assert_eq!(
+            pins.longest_match(&["g", "ch", "main"]),
+            Some((2, vec!["git".into(), "checkout".into()]))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_remove_pin() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-pins-remove");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("pins.txt");
+
+        Pins::append(&path, &["g", "ch"], &["git", "checkout"]).unwrap();
+        Pins::append(&path, &["tf"], &["terraform"]).unwrap();
+
+        let found = Pins::remove(&path, &["g", "ch"]).unwrap();
+        assert!(found);
+
+        let pins = Pins::load(&path);
+        assert_eq!(pins.entries.len(), 1);
+        assert!(pins.longest_match(&["g", "ch"]).is_none());
+        assert!(pins.longest_match(&["tf"]).is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_pin() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-pins-remove-none");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("pins.txt");
+
+        Pins::append(&path, &["tf"], &["terraform"]).unwrap();
+        let found = Pins::remove(&path, &["xyz"]).unwrap();
+        assert!(!found);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_file() {
+        let found = Pins::remove(Path::new("/tmp/zsh-ios-nonexistent-pins.txt"), &["a"]).unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let pins = Pins::load(Path::new("/tmp/zsh-ios-nonexistent-pins.txt"));
+        assert!(pins.entries.is_empty());
+    }
+
+    #[test]
+    fn test_longest_match_empty_words() {
+        let pins = Pins {
+            entries: vec![Pin {
+                abbrev: vec!["g".into()],
+                expanded: vec!["git".into()],
+            }],
+        };
+        assert_eq!(pins.longest_match(&[]), None);
+    }
+
+    #[test]
+    fn test_load_skips_lines_without_arrow() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-pins-noarrow");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("pins.txt");
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, "g ch -> git checkout").unwrap();
+        writeln!(f, "this line has no arrow").unwrap();
+        writeln!(f, "tf -> terraform").unwrap();
+
+        let pins = Pins::load(&path);
+        assert_eq!(pins.entries.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

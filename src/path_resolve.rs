@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
 pub enum PathResult {
     Resolved(String),
     /// Multiple full resolved paths -- caller should let user pick.
@@ -488,5 +489,145 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Tests for join_path_parts ---
+
+    #[test]
+    fn test_join_path_parts_empty() {
+        assert_eq!(join_path_parts(&[]), "");
+    }
+
+    #[test]
+    fn test_join_path_parts_absolute() {
+        let parts: Vec<String> = vec!["".into(), "usr".into(), "local".into()];
+        assert_eq!(join_path_parts(&parts), "/usr/local");
+    }
+
+    #[test]
+    fn test_join_path_parts_tilde() {
+        let parts: Vec<String> = vec!["~".into(), "Documents".into()];
+        assert_eq!(join_path_parts(&parts), "~/Documents");
+    }
+
+    #[test]
+    fn test_join_path_parts_tilde_alone() {
+        let parts: Vec<String> = vec!["~".into()];
+        assert_eq!(join_path_parts(&parts), "~");
+    }
+
+    #[test]
+    fn test_join_path_parts_relative() {
+        let parts: Vec<String> = vec!["src".into(), "main.rs".into()];
+        assert_eq!(join_path_parts(&parts), "src/main.rs");
+    }
+
+    #[test]
+    fn test_join_path_parts_root_only() {
+        let parts: Vec<String> = vec!["".into()];
+        assert_eq!(join_path_parts(&parts), "");
+    }
+
+    // --- Tests for resolve_path_dirs_only ---
+
+    #[test]
+    fn test_resolve_path_dirs_only() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-dirsonly");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(dir.join("subdir"));
+        // Create a file that shares a prefix
+        let _ = fs::write(dir.join("subfile"), "");
+
+        let result = resolve_component(&dir, "sub", true);
+        match result {
+            ComponentMatch::Unique(name) => assert_eq!(name, "subdir"),
+            other => panic!("Expected Unique dir match, got {:?}", other),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Tests for case-insensitive fallback ---
+
+    #[test]
+    fn test_case_insensitive_match() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-case");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(dir.join("Documents"));
+
+        // Lowercase input should match uppercase entry (case-insensitive fallback)
+        let result = resolve_component(&dir, "doc", false);
+        match result {
+            ComponentMatch::Unique(name) => assert_eq!(name, "Documents"),
+            other => panic!("Expected case-insensitive Unique match, got {:?}", other),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Tests for ambiguous match ---
+
+    #[test]
+    fn test_ambiguous_prefix_match() {
+        let dir = std::env::temp_dir().join("zsh-ios-test-ambiguous");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(dir.join("apple"));
+        let _ = fs::create_dir_all(dir.join("application"));
+
+        let result = resolve_component(&dir, "app", false);
+        match result {
+            ComponentMatch::Ambiguous(names) => {
+                assert_eq!(names.len(), 2);
+                assert!(names.contains(&"apple".to_string()));
+                assert!(names.contains(&"application".to_string()));
+            }
+            other => panic!("Expected Ambiguous, got {:?}", other),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Tests for resolve_path end-to-end ---
+
+    #[test]
+    fn test_resolve_path_unchanged() {
+        // A completely non-matching path should return Unchanged
+        match resolve_path("zzzznonexistent") {
+            PathResult::Unchanged => {}
+            other => panic!("Expected Unchanged for nonexistent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_path_empty() {
+        match resolve_path("") {
+            PathResult::Unchanged => {}
+            other => panic!("Expected Unchanged for empty, got {:?}", other),
+        }
+    }
+
+    // --- Tests for list_dir ---
+
+    #[test]
+    fn test_list_dir_nonexistent() {
+        let entries = list_dir(Path::new("/nonexistent_dir_zshios"), false);
+        assert!(entries.is_empty());
+    }
+
+    // --- Tests for deep_filter ---
+
+    #[test]
+    fn test_deep_filter_empty_remaining() {
+        let candidates = vec!["a".to_string(), "b".to_string()];
+        let result = deep_filter(Path::new("/tmp"), &candidates, &[], false);
+        assert_eq!(result, candidates);
+    }
+
+    #[test]
+    fn test_deep_filter_empty_next() {
+        let candidates = vec!["a".to_string()];
+        let remaining = vec!["".to_string()];
+        let result = deep_filter(Path::new("/tmp"), &candidates, &remaining, false);
+        assert_eq!(result, candidates);
     }
 }

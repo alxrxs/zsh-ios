@@ -968,7 +968,7 @@ fn shell_escape_path(path: &str) -> String {
 }
 
 /// How a command's arguments should be resolved.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArgMode {
     /// Trie resolution + filesystem path resolution (default).
     Normal,
@@ -2260,5 +2260,473 @@ mod tests {
 
         let (words, _) = split_words_quoted("simple words here");
         assert_eq!(words, vec!["simple", "words", "here"]);
+    }
+
+    #[test]
+    fn test_split_words_quoted_inline_quotes() {
+        // Inline quotes within an unquoted word
+        let (words, quoted) = split_words_quoted("foo\"bar baz\"qux end");
+        assert_eq!(words, vec!["foo\"bar baz\"qux", "end"]);
+        assert_eq!(quoted, vec![true, false]);
+    }
+
+    #[test]
+    fn test_split_words_quoted_backslash_escape() {
+        let (words, _) = split_words_quoted("echo hello\\ world");
+        assert_eq!(words, vec!["echo", "hello\\ world"]);
+    }
+
+    #[test]
+    fn test_split_words_quoted_empty() {
+        let (words, quoted) = split_words_quoted("");
+        assert!(words.is_empty());
+        assert!(quoted.is_empty());
+
+        let (words, _) = split_words_quoted("   ");
+        assert!(words.is_empty());
+    }
+
+    #[test]
+    fn test_split_words_quoted_unclosed_double() {
+        // Unclosed double quote — should consume to end
+        let (words, quoted) = split_words_quoted("echo \"unclosed");
+        assert_eq!(words, vec!["echo", "\"unclosed"]);
+        assert_eq!(quoted, vec![false, true]);
+    }
+
+    #[test]
+    fn test_split_words_quoted_unclosed_single() {
+        let (words, quoted) = split_words_quoted("echo 'unclosed");
+        assert_eq!(words, vec!["echo", "'unclosed"]);
+        assert_eq!(quoted, vec![false, true]);
+    }
+
+    // --- Tests for longest_common_prefix ---
+
+    #[test]
+    fn test_lcp_empty() {
+        assert_eq!(longest_common_prefix(&[]), "");
+    }
+
+    #[test]
+    fn test_lcp_single() {
+        assert_eq!(
+            longest_common_prefix(&["checkout".to_string()]),
+            "checkout"
+        );
+    }
+
+    #[test]
+    fn test_lcp_common_prefix() {
+        assert_eq!(
+            longest_common_prefix(&["checkout".into(), "cherry-pick".into(), "clean".into()]),
+            "c"
+        );
+        assert_eq!(
+            longest_common_prefix(&["checkout".into(), "cherry-pick".into()]),
+            "che"
+        );
+    }
+
+    #[test]
+    fn test_lcp_no_common() {
+        assert_eq!(
+            longest_common_prefix(&["abc".into(), "xyz".into()]),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_lcp_identical() {
+        assert_eq!(
+            longest_common_prefix(&["foo".into(), "foo".into()]),
+            "foo"
+        );
+    }
+
+    // --- Tests for looks_like_path ---
+
+    #[test]
+    fn test_looks_like_path() {
+        assert!(looks_like_path("/usr/bin"));
+        assert!(looks_like_path("~/file"));
+        assert!(looks_like_path("./relative"));
+        assert!(looks_like_path(".."));
+        assert!(looks_like_path("!suffix"));
+        assert!(looks_like_path("*pattern"));
+        assert!(looks_like_path("\\!literal"));
+        assert!(looks_like_path("\\*literal"));
+        assert!(!looks_like_path("git"));
+        assert!(!looks_like_path("terraform"));
+        assert!(!looks_like_path("-flag"));
+    }
+
+    // --- Tests for u8_to_arg_mode ---
+
+    #[test]
+    fn test_u8_to_arg_mode() {
+        assert_eq!(u8_to_arg_mode(0), ArgMode::Normal);
+        assert_eq!(u8_to_arg_mode(trie::ARG_MODE_PATHS), ArgMode::Paths);
+        assert_eq!(u8_to_arg_mode(trie::ARG_MODE_DIRS_ONLY), ArgMode::DirsOnly);
+        assert_eq!(u8_to_arg_mode(trie::ARG_MODE_EXECS_ONLY), ArgMode::ExecsOnly);
+        assert_eq!(u8_to_arg_mode(trie::ARG_MODE_PIDS), ArgMode::Runtime(trie::ARG_MODE_PIDS));
+        assert_eq!(u8_to_arg_mode(trie::ARG_MODE_SIGNALS), ArgMode::Runtime(trie::ARG_MODE_SIGNALS));
+        assert_eq!(u8_to_arg_mode(trie::ARG_MODE_GIT_BRANCHES), ArgMode::Runtime(trie::ARG_MODE_GIT_BRANCHES));
+    }
+
+    // --- Tests for arg_mode ---
+
+    #[test]
+    fn test_arg_mode_from_map() {
+        let mut modes = ArgModeMap::new();
+        modes.insert("cd".into(), trie::ARG_MODE_DIRS_ONLY);
+        modes.insert("cat".into(), trie::ARG_MODE_PATHS);
+        modes.insert("which".into(), trie::ARG_MODE_EXECS_ONLY);
+
+        assert_eq!(arg_mode("cd", &modes), ArgMode::DirsOnly);
+        assert_eq!(arg_mode("cat", &modes), ArgMode::Paths);
+        assert_eq!(arg_mode("which", &modes), ArgMode::ExecsOnly);
+    }
+
+    #[test]
+    fn test_arg_mode_runtime_falls_through() {
+        // Runtime types (4+) should fall through to hardcoded list
+        let mut modes = ArgModeMap::new();
+        modes.insert("ls".into(), trie::ARG_MODE_PIDS); // bogus runtime type
+        // ls is in PATH_COMMANDS, so it should still get Paths
+        assert_eq!(arg_mode("ls", &modes), ArgMode::Paths);
+    }
+
+    #[test]
+    fn test_arg_mode_hardcoded_fallback() {
+        let modes = ArgModeMap::new(); // empty map
+        assert_eq!(arg_mode("cd", &modes), ArgMode::DirsOnly);
+        assert_eq!(arg_mode("pushd", &modes), ArgMode::DirsOnly);
+        assert_eq!(arg_mode("ls", &modes), ArgMode::Paths);
+        assert_eq!(arg_mode("cp", &modes), ArgMode::Paths);
+        assert_eq!(arg_mode("which", &modes), ArgMode::ExecsOnly);
+        assert_eq!(arg_mode("man", &modes), ArgMode::ExecsOnly);
+        assert_eq!(arg_mode("git", &modes), ArgMode::Normal);
+    }
+
+    // --- Tests for is_hardcoded_path_command ---
+
+    #[test]
+    fn test_is_hardcoded_path_command() {
+        assert!(is_hardcoded_path_command("cd"));
+        assert!(is_hardcoded_path_command("pushd"));
+        assert!(is_hardcoded_path_command("ls"));
+        assert!(is_hardcoded_path_command("cat"));
+        assert!(is_hardcoded_path_command("vim"));
+        assert!(!is_hardcoded_path_command("git"));
+        assert!(!is_hardcoded_path_command("which"));
+    }
+
+    // --- Tests for lookup_arg_spec ---
+
+    #[test]
+    fn test_lookup_arg_spec_two_word() {
+        let mut specs = trie::ArgSpecMap::new();
+        let mut git_add_spec = ArgSpec::default();
+        git_add_spec.rest = Some(trie::ARG_MODE_PATHS);
+        specs.insert("git add".into(), git_add_spec);
+
+        let words: Vec<String> = vec!["git".into(), "add".into(), "file.txt".into()];
+        let (spec, skip) = lookup_arg_spec(&words, &specs);
+        assert!(spec.is_some());
+        assert_eq!(skip, 2);
+        assert_eq!(spec.unwrap().rest, Some(trie::ARG_MODE_PATHS));
+    }
+
+    #[test]
+    fn test_lookup_arg_spec_one_word_fallback() {
+        let mut specs = trie::ArgSpecMap::new();
+        let mut cat_spec = ArgSpec::default();
+        cat_spec.rest = Some(trie::ARG_MODE_PATHS);
+        specs.insert("cat".into(), cat_spec);
+
+        let words: Vec<String> = vec!["cat".into(), "file.txt".into()];
+        let (spec, skip) = lookup_arg_spec(&words, &specs);
+        assert!(spec.is_some());
+        assert_eq!(skip, 1);
+    }
+
+    #[test]
+    fn test_lookup_arg_spec_not_found() {
+        let specs = trie::ArgSpecMap::new();
+        let words: Vec<String> = vec!["unknown".into()];
+        let (spec, skip) = lookup_arg_spec(&words, &specs);
+        assert!(spec.is_none());
+        assert_eq!(skip, 1);
+    }
+
+    #[test]
+    fn test_lookup_arg_spec_flag_not_subcmd() {
+        // If word[1] starts with -, don't try two-word lookup
+        let mut specs = trie::ArgSpecMap::new();
+        let mut cat_spec = ArgSpec::default();
+        cat_spec.rest = Some(trie::ARG_MODE_PATHS);
+        specs.insert("cat".into(), cat_spec);
+
+        let words: Vec<String> = vec!["cat".into(), "-n".into(), "file.txt".into()];
+        let (spec, skip) = lookup_arg_spec(&words, &specs);
+        assert!(spec.is_some());
+        assert_eq!(skip, 1); // fell back to one-word
+    }
+
+    // --- Tests for arg_type_for_word ---
+
+    #[test]
+    fn test_arg_type_for_word_flag_value() {
+        let mut spec = ArgSpec::default();
+        spec.flag_args.insert("-o".into(), trie::ARG_MODE_PATHS);
+        // Word after -o should be Paths
+        assert_eq!(
+            arg_type_for_word(1, Some("-o"), Some(&spec), ArgMode::Normal),
+            ArgMode::Paths
+        );
+    }
+
+    #[test]
+    fn test_arg_type_for_word_positional() {
+        let mut spec = ArgSpec::default();
+        spec.positional.insert(1, trie::ARG_MODE_HOSTS);
+        assert_eq!(
+            arg_type_for_word(1, None, Some(&spec), ArgMode::Normal),
+            ArgMode::Runtime(trie::ARG_MODE_HOSTS)
+        );
+    }
+
+    #[test]
+    fn test_arg_type_for_word_fallback() {
+        let spec = ArgSpec::default(); // empty spec
+        assert_eq!(
+            arg_type_for_word(1, None, Some(&spec), ArgMode::Paths),
+            ArgMode::Paths
+        );
+        assert_eq!(
+            arg_type_for_word(1, None, None, ArgMode::DirsOnly),
+            ArgMode::DirsOnly
+        );
+    }
+
+    // --- Tests for format_columns ---
+
+    #[test]
+    fn test_format_columns_empty() {
+        assert_eq!(format_columns(&[], 100), "");
+    }
+
+    #[test]
+    fn test_format_columns_single_column() {
+        let names = vec!["add", "commit", "push"];
+        let result = format_columns(&names, 100);
+        assert!(result.contains("  add\n"));
+        assert!(result.contains("  commit\n"));
+        assert!(result.contains("  push\n"));
+    }
+
+    #[test]
+    fn test_format_columns_overflow_message() {
+        let names: Vec<&str> = (0..5).map(|i| match i {
+            0 => "a", 1 => "b", 2 => "c", 3 => "d", _ => "e",
+        }).collect();
+        let result = format_columns(&names, 3);
+        assert!(result.contains("... and 2 more"));
+    }
+
+    #[test]
+    fn test_format_columns_multi_column() {
+        // >12 items should use multi-column layout
+        let names: Vec<&str> = vec![
+            "aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj", "kk", "ll", "mm",
+        ];
+        let result = format_columns(&names, 100);
+        // Should have fewer lines than items (multi-column)
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.len() < names.len());
+    }
+
+    // --- Tests for resolve_first_word ---
+
+    #[test]
+    fn test_resolve_first_word_exact() {
+        let trie = build_test_trie();
+        assert_eq!(resolve_first_word("git", &trie), "git");
+    }
+
+    #[test]
+    fn test_resolve_first_word_prefix() {
+        let trie = build_test_trie();
+        assert_eq!(resolve_first_word("ter", &trie), "terraform");
+    }
+
+    #[test]
+    fn test_resolve_first_word_ambiguous() {
+        let trie = build_test_trie();
+        // "g" matches git, grep, go, gzip — returns unchanged
+        assert_eq!(resolve_first_word("g", &trie), "g");
+    }
+
+    #[test]
+    fn test_resolve_first_word_no_match() {
+        let trie = build_test_trie();
+        assert_eq!(resolve_first_word("zzz", &trie), "zzz");
+    }
+
+    // --- Tests for split_on_operators ---
+
+    #[test]
+    fn test_split_on_operators_simple() {
+        let parts = split_on_operators("ls -la");
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], LinePart::Command(c) if c == "ls -la"));
+    }
+
+    #[test]
+    fn test_split_on_operators_pipe() {
+        let parts = split_on_operators("ls | grep foo");
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], LinePart::Command(c) if c == "ls "));
+        assert!(matches!(&parts[1], LinePart::Operator(o) if o == "|"));
+        assert!(matches!(&parts[2], LinePart::Command(c) if c == " grep foo"));
+    }
+
+    #[test]
+    fn test_split_on_operators_and() {
+        let parts = split_on_operators("a && b");
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[1], LinePart::Operator(o) if o == "&&"));
+    }
+
+    #[test]
+    fn test_split_on_operators_semicolon() {
+        let parts = split_on_operators("a; b");
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[1], LinePart::Operator(o) if o == ";"));
+    }
+
+    #[test]
+    fn test_split_on_operators_quoted() {
+        // Operators inside quotes should not split
+        let parts = split_on_operators("echo \"a && b\"");
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], LinePart::Command(c) if c == "echo \"a && b\""));
+    }
+
+    #[test]
+    fn test_split_on_operators_single_quoted() {
+        let parts = split_on_operators("echo 'a | b'");
+        assert_eq!(parts.len(), 1);
+    }
+
+    // --- Tests for deep_disambiguate edge cases ---
+
+    #[test]
+    fn test_deep_disambig_empty_rest() {
+        let mut trie = CommandTrie::new();
+        trie.insert(&["git", "commit"]);
+        trie.insert(&["grep", "-r"]);
+        let matches = trie.root.prefix_search("g");
+        let result = deep_disambiguate(&matches, &[]);
+        // With empty rest, should return all matches unchanged
+        assert_eq!(result.len(), matches.len());
+    }
+
+    #[test]
+    fn test_deep_disambig_flag_skipped() {
+        let mut trie = CommandTrie::new();
+        trie.insert(&["git", "commit", "-m"]);
+        trie.insert(&["go", "build", "-o"]);
+        let matches = trie.root.prefix_search("g");
+        // Flags should be skipped during lookahead
+        let result = deep_disambiguate(&matches, &["co", "-m"]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "git");
+    }
+
+    // --- Tests for shell_escape_path edge cases ---
+
+    #[test]
+    fn test_shell_escape_all_metacharacters() {
+        assert_eq!(shell_escape_path("a[b]"), "a\\[b\\]");
+        assert_eq!(shell_escape_path("a{b}"), "a\\{b\\}");
+        assert_eq!(shell_escape_path("a#b"), "a\\#b");
+        assert_eq!(shell_escape_path("a?b"), "a\\?b");
+        assert_eq!(shell_escape_path("a<b>"), "a\\<b\\>");
+        assert_eq!(shell_escape_path("a=b"), "a\\=b");
+        assert_eq!(shell_escape_path("a^b"), "a\\^b");
+        assert_eq!(shell_escape_path("a\\b"), "a\\\\b");
+        assert_eq!(shell_escape_path("a`b`"), "a\\`b\\`");
+    }
+
+    // --- Tests for resolve_line with empty segments ---
+
+    #[test]
+    fn test_resolve_line_trailing_operator() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        // "ter ap &&" has an empty segment after &&
+        match resolve_line("ter ap && ", &trie, &pins) {
+            ResolveResult::Resolved(s) => assert_eq!(s, "terraform apply && "),
+            other => panic!("Expected Resolved, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_line_or_operator() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        match resolve_line("ter in || ter ap", &trie, &pins) {
+            ResolveResult::Resolved(s) => {
+                assert_eq!(s, "terraform init || terraform apply");
+            }
+            other => panic!("Expected Resolved, got {:?}", other),
+        }
+    }
+
+    // --- Tests for wrapper passthrough ---
+
+    #[test]
+    fn test_wrapper_passthrough_when_unchanged() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        // sudo with an already-resolved command should passthrough
+        match resolve("sudo terraform apply", &trie, &pins) {
+            ResolveResult::Passthrough(s) => assert_eq!(s, "sudo terraform apply"),
+            other => panic!("Expected Passthrough, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_nohup_resolves_inner_command() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        match resolve("nohup ter ap", &trie, &pins) {
+            ResolveResult::Resolved(s) => assert_eq!(s, "nohup terraform apply"),
+            other => panic!("Expected Resolved, got {:?}", other),
+        }
+    }
+
+    // --- Test resolve with empty input ---
+
+    #[test]
+    fn test_resolve_empty_input() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        match resolve("", &trie, &pins) {
+            ResolveResult::Passthrough(s) => assert_eq!(s, ""),
+            other => panic!("Expected Passthrough, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_whitespace_only() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        match resolve("   ", &trie, &pins) {
+            ResolveResult::Passthrough(s) => assert_eq!(s, "   "),
+            other => panic!("Expected Passthrough, got {:?}", other),
+        }
     }
 }
