@@ -111,8 +111,19 @@ fn cmd_build(aliases_stdin: bool) {
 
     // 4. Parse history
     let hist_path = std::env::var("HISTFILE")
+        .ok()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".zsh_history"));
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
+            let home = dirs::home_dir().unwrap_or_default();
+            // Try common history file locations
+            let candidates = [".zsh_history", ".histfile"];
+            candidates
+                .iter()
+                .map(|name| home.join(name))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| home.join(".zsh_history"))
+        });
 
     match history::parse_history(&hist_path, &mut ct) {
         Ok(count) => eprintln!("Parsed {} commands from history", count),

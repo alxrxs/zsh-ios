@@ -54,7 +54,8 @@ echo ""
 
 # 5. Run initial build
 echo "Building initial command tree..."
-zsh -c "source \"$ZSHRC\" 2>/dev/null; alias" | zsh-ios build --aliases-stdin
+HISTFILE="$(zsh -c "source \"$ZSHRC\" 2>/dev/null; echo \$HISTFILE")" \
+    zsh -c "source \"$ZSHRC\" 2>/dev/null; alias" | zsh-ios build --aliases-stdin
 echo ""
 
 echo "=== Installation complete! ==="
