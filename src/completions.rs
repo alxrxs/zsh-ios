@@ -696,9 +696,17 @@ fn extract_from_dirs(
             };
 
             if let Ok(content) = fs::read_to_string(&real_path) {
-                // Track every command name this file covers.
-                cmds_with_completions.insert(cmd.to_string());
                 let commands = parse_compdef_commands(&content);
+
+                // Only add `cmd` (filename-derived) to the covered set if the
+                // `#compdef` header either doesn't list anything (implicit
+                // coverage) or explicitly includes `cmd`.  If `#compdef` names
+                // other commands but NOT `cmd` (e.g. `_go` covers `gccgo gofmt`
+                // but not the modern `go` CLI), `cmd` must NOT block its
+                // hardcoded well-known spec.
+                if commands.is_empty() || commands.iter().any(|c| c == cmd) {
+                    cmds_with_completions.insert(cmd.to_string());
+                }
                 for c in &commands {
                     cmds_with_completions.insert(c.clone());
                 }
@@ -742,8 +750,13 @@ fn parse_compdef_commands(content: &str) -> Vec<String> {
         if let Some(rest) = trimmed.strip_prefix("#compdef ") {
             return rest
                 .split_whitespace()
-                .filter(|w| !w.starts_with('-'))
-                .map(String::from)
+                // Drop flags (-P, -K, etc.) and glob/regex patterns ([, *, #, ?)
+                .filter(|w| {
+                    !w.starts_with('-')
+                        && !w.contains(['[', ']', '*', '#', '?', '(', ')'])
+                })
+                // Strip `alias=realcmd` forms; keep only the real command name
+                .map(|w| w.split('=').next().unwrap_or(w).to_string())
                 .collect();
         }
         // #compdef must be in the first few lines
@@ -2420,6 +2433,32 @@ subcmds=(
         assert!(!is_internal_completion("git"));
         assert!(!is_internal_completion("docker"));
         assert!(!is_internal_completion("ssh"));
+    }
+
+    #[test]
+    fn test_parse_compdef_commands_glob_filtered() {
+        // _pip: #compdef -P pip[0-9.]# — should produce no commands (all glob)
+        let content = "#compdef -P pip[0-9.]#\n";
+        assert!(parse_compdef_commands(content).is_empty());
+
+        // _go: #compdef gccgo gofmt 5l ... — should not include "go"
+        let content = "#compdef gccgo gofmt 5l 6l 8l 5g 6g 8g\n";
+        let cmds = parse_compdef_commands(content);
+        assert!(!cmds.contains(&"go".to_string()));
+        assert!(cmds.contains(&"gccgo".to_string()));
+        assert!(cmds.contains(&"gofmt".to_string()));
+    }
+
+    #[test]
+    fn test_go_not_in_cmds_with_completions() {
+        let path = "/usr/share/zsh/5.9/functions/_go";
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let commands = parse_compdef_commands(&content);
+        // The _go file covers gccgo/gofmt etc. but NOT the modern `go` CLI
+        assert!(!commands.contains(&"go".to_string()), 
+            "_go compdef should not list 'go', got: {:?}", commands);
     }
 
     #[test]
