@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -17,7 +17,7 @@ pub fn scan_completions(trie: &mut CommandTrie) -> u32 {
     let fpath_dirs = completion_dirs();
     let mut total = 0u32;
 
-    let (subcmds, arg_specs) = extract_from_dirs(&fpath_dirs);
+    let (subcmds, arg_specs, cmds_with_completions) = extract_from_dirs(&fpath_dirs);
     for (cmd, subs) in &subcmds {
         for sub in subs {
             trie.insert(&[cmd.as_str(), sub.as_str()]);
@@ -33,9 +33,9 @@ pub fn scan_completions(trie: &mut CommandTrie) -> u32 {
     }
     trie.arg_specs.extend(arg_specs);
 
-    // Apply well-known hardcoded specs for commands whose Zsh completions are
-    // too dynamic to parse statically (runtime conditionals, _alternative, etc.)
-    apply_well_known_specs(&mut trie.arg_specs);
+    // Apply well-known hardcoded specs ONLY for commands without a Zsh completion file.
+    // Commands with completion files are fully handled by the parser — no hardcoding.
+    apply_well_known_specs(&mut trie.arg_specs, &cmds_with_completions);
 
     // Seed well-known deep subcommand hierarchies (docker compose, git subcommands, etc.)
     // These are commands where the Zsh completion files might not have _cmd-subcmd patterns.
@@ -357,7 +357,7 @@ fn seed_well_known_subcommands(trie: &mut CommandTrie) -> u32 {
 /// Hardcoded arg specs for commands where Zsh completions use runtime-conditional
 /// logic that static parsing can't resolve. These only fill in gaps — they won't
 /// overwrite a position if the parser already detected a non-Paths type.
-fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>) {
+fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>, cmds_with_completions: &HashSet<String>) {
     use trie::*;
 
     type Override<'a> = (&'a str, &'a [(u32, u8)], Option<u8>, &'a [(&'a str, u8)]);
@@ -598,9 +598,15 @@ fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>) {
     ];
 
     for &(cmd, positional, rest, flags) in overrides {
+        // Skip entirely if the base command has a Zsh completion file —
+        // everything must come from the parser in that case.
+        let base_cmd = cmd.split_whitespace().next().unwrap_or(cmd);
+        if cmds_with_completions.contains(base_cmd) {
+            continue;
+        }
+
         let spec = specs.entry(cmd.to_string()).or_default();
         for &(pos, arg_type) in positional {
-            // Overwrite if the parser only found a generic type (Paths/Normal)
             let existing = spec.positional.get(&pos).copied();
             if existing.is_none() || existing == Some(ARG_MODE_PATHS) || existing == Some(0) {
                 spec.positional.insert(pos, arg_type);
@@ -612,7 +618,6 @@ fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>) {
             spec.rest = Some(r);
         }
         for &(flag, arg_type) in flags {
-            // Overwrite generic types for flags too
             let existing = spec.flag_args.get(flag).copied();
             if existing.is_none() || existing == Some(ARG_MODE_PATHS) || existing == Some(0) {
                 spec.flag_args.insert(flag.to_string(), arg_type);
@@ -649,9 +654,16 @@ fn completion_dirs() -> Vec<String> {
 
 /// Extract subcommands and per-position argument specs from completion files.
 /// Returns (command -> subcommands, command -> ArgSpec).
-fn extract_from_dirs(dirs: &[String]) -> (HashMap<String, Vec<String>>, HashMap<String, ArgSpec>) {
+fn extract_from_dirs(
+    dirs: &[String],
+) -> (
+    HashMap<String, Vec<String>>,
+    HashMap<String, ArgSpec>,
+    HashSet<String>,
+) {
     let mut subcmds: HashMap<String, Vec<String>> = HashMap::new();
     let mut arg_specs: HashMap<String, ArgSpec> = HashMap::new();
+    let mut cmds_with_completions: HashSet<String> = HashSet::new();
 
     for dir in dirs {
         let dir_path = Path::new(dir);
@@ -684,12 +696,18 @@ fn extract_from_dirs(dirs: &[String]) -> (HashMap<String, Vec<String>>, HashMap<
             };
 
             if let Ok(content) = fs::read_to_string(&real_path) {
+                // Track every command name this file covers.
+                cmds_with_completions.insert(cmd.to_string());
+                let commands = parse_compdef_commands(&content);
+                for c in &commands {
+                    cmds_with_completions.insert(c.clone());
+                }
+
                 let subs = extract_subcommands_from_content(cmd, &content);
                 if !subs.is_empty() {
                     subcmds.entry(cmd.to_string()).or_default().extend(subs);
                 }
 
-                let commands = parse_compdef_commands(&content);
                 let spec = parse_arg_spec(&content);
                 if !spec.is_empty() {
                     for c in &commands {
@@ -713,7 +731,7 @@ fn extract_from_dirs(dirs: &[String]) -> (HashMap<String, Vec<String>>, HashMap<
         subs.dedup();
     }
 
-    (subcmds, arg_specs)
+    (subcmds, arg_specs, cmds_with_completions)
 }
 
 /// Parse the `#compdef` header to get the list of commands this file covers.
@@ -738,6 +756,25 @@ fn parse_compdef_commands(content: &str) -> Vec<String> {
 
 /// Detect the argument type from a Zsh completion action string.
 /// Recognizes all standard Zsh completion helpers, not just files/dirs/execs.
+/// Check if `s` contains `func` as a standalone identifier (word-boundary match).
+/// Prevents "_files" from matching "__git_tree_files".
+fn contains_func_name(s: &str, func: &str) -> bool {
+    let bytes = s.as_bytes();
+    let flen = func.len();
+    let mut start = 0;
+    while let Some(pos) = s[start..].find(func).map(|p| p + start) {
+        let before_ok = pos == 0
+            || !matches!(bytes.get(pos - 1), Some(b) if b.is_ascii_alphanumeric() || *b == b'_');
+        let after_ok =
+            !matches!(bytes.get(pos + flen), Some(b) if b.is_ascii_alphanumeric() || *b == b'_');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
 fn action_to_arg_type(action: &str) -> Option<u8> {
     let action = action.trim().trim_matches('\'').trim_matches('"');
 
@@ -749,7 +786,7 @@ fn action_to_arg_type(action: &str) -> Option<u8> {
         return Some(trie::ARG_MODE_EXECS_ONLY);
     }
 
-    // Directories
+    // Directories — must test before generic _files to catch "_files -/"
     if action.contains("_directories")
         || action.contains("_files -/")
         || action.contains("_path_files -/")
@@ -758,12 +795,12 @@ fn action_to_arg_type(action: &str) -> Option<u8> {
         return Some(trie::ARG_MODE_DIRS_ONLY);
     }
 
-    // Files (general)
-    if action.contains("_files") || action.contains("_path_files") {
+    // Files (general) — word-boundary check so "__git_tree_files" doesn't match
+    if contains_func_name(action, "_files") || contains_func_name(action, "_path_files") {
         return Some(trie::ARG_MODE_PATHS);
     }
 
-    // Git-specific
+    // Git-specific (checked before generic resources to avoid false positives)
     if action.contains("__git_branch_names")
         || action.contains("__git_heads")
         || action.contains("_git_branch")
@@ -776,15 +813,24 @@ fn action_to_arg_type(action: &str) -> Option<u8> {
     if action.contains("__git_remotes") {
         return Some(trie::ARG_MODE_GIT_REMOTES);
     }
+    // Git tree files and cached/modified/indexed files → GIT_FILES
     if action.contains("__git_files")
         || action.contains("__git_cached_files")
         || action.contains("__git_modified_files")
+        || action.contains("__git_tree_files")
     {
         return Some(trie::ARG_MODE_GIT_FILES);
     }
     // Untracked/other working-tree files are just regular filesystem files.
     if action.contains("__git_other_files") {
         return Some(trie::ARG_MODE_PATHS);
+    }
+    // Commits, tree-ishs — resolve as branches (closest approximation).
+    if action.contains("__git_commits")
+        || action.contains("__git_tree_ish")
+        || action.contains("__git_recent")
+    {
+        return Some(trie::ARG_MODE_GIT_BRANCHES);
     }
 
     // System resources
@@ -983,8 +1029,10 @@ fn parse_state_ref(spec: &str) -> Option<(StateRefKind, String)> {
             Ok(n) => StateRefKind::Positional(n),
             Err(_) => StateRefKind::Rest,
         }
+    } else if s.starts_with(':') {
+        // Bare ':desc:->state' — means "next positional argument" (position 1)
+        StateRefKind::Positional(1)
     } else {
-        // Bare ':desc:->state' — treat as rest
         StateRefKind::Rest
     };
 
@@ -1098,10 +1146,12 @@ fn extract_case_arm_name(line: &str) -> Option<String> {
 /// Detect the dominant argument type in a block of shell code.
 /// Checks for _files/_directories/_command_names in direct calls
 /// and within `_alternative` / `_values` / `_regex_words` action specs.
+/// Also detects runtime types (_users, _hosts, _pids, _signals, etc.).
 fn detect_type_in_block(body: &str) -> Option<u8> {
     let mut has_files = false;
     let mut has_dirs = false;
     let mut has_execs = false;
+    let mut runtime_type: Option<u8> = None;
 
     for line in body.lines() {
         let trimmed = line.trim();
@@ -1109,14 +1159,14 @@ fn detect_type_in_block(body: &str) -> Option<u8> {
             continue;
         }
 
-        // Direct calls
+        // Direct calls — filesystem types
         if trimmed.contains("_directories")
             || (trimmed.contains("_path_files") && trimmed.contains("-/"))
             || trimmed.contains("_files -/")
         {
             has_dirs = true;
         }
-        if (trimmed.contains("_files") || trimmed.contains("_path_files"))
+        if (contains_func_name(trimmed, "_files") || contains_func_name(trimmed, "_path_files"))
             && !trimmed.contains("-/")
         {
             has_files = true;
@@ -1128,18 +1178,48 @@ fn detect_type_in_block(body: &str) -> Option<u8> {
             has_execs = true;
         }
 
+        // Direct calls — runtime types (bare function calls in state handler bodies)
+        // e.g. `_pids`, `_ssh_hosts`, `_wanted hosts ... _ssh_hosts`
+        if let Some(t) = action_to_arg_type(trimmed) {
+            accumulate_runtime_type(t, &mut has_files, &mut has_dirs, &mut has_execs, &mut runtime_type);
+        }
+
         // Parse single-quoted 'tag:desc:action' specs from _alternative / _values
-        scan_quoted_action_specs(trimmed, &mut has_files, &mut has_dirs, &mut has_execs);
+        scan_quoted_action_specs(trimmed, &mut has_files, &mut has_dirs, &mut has_execs, &mut runtime_type);
     }
 
-    if has_execs && !has_files && !has_dirs {
+    if has_execs && !has_files && !has_dirs && runtime_type.is_none() {
         Some(trie::ARG_MODE_EXECS_ONLY)
-    } else if has_dirs && !has_files {
+    } else if has_dirs && !has_files && runtime_type.is_none() {
         Some(trie::ARG_MODE_DIRS_ONLY)
     } else if has_files || has_dirs {
         Some(trie::ARG_MODE_PATHS)
     } else {
-        None
+        runtime_type
+    }
+}
+
+/// Merge a newly detected type into the running accumulators.
+/// Filesystem types set the has_* flags; runtime types are stored separately.
+/// If two different runtime types appear in the same block, fall back to PATHS.
+fn accumulate_runtime_type(
+    t: u8,
+    has_files: &mut bool,
+    has_dirs: &mut bool,
+    has_execs: &mut bool,
+    runtime_type: &mut Option<u8>,
+) {
+    match t {
+        trie::ARG_MODE_DIRS_ONLY => *has_dirs = true,
+        trie::ARG_MODE_PATHS => *has_files = true,
+        trie::ARG_MODE_EXECS_ONLY => *has_execs = true,
+        other => {
+            // Keep the first runtime type seen; subsequent different types are
+            // typically secondary alternatives (e.g. file fallback in the same state).
+            if runtime_type.is_none() {
+                *runtime_type = Some(other);
+            }
+        }
     }
 }
 
@@ -1151,6 +1231,7 @@ fn scan_quoted_action_specs(
     has_files: &mut bool,
     has_dirs: &mut bool,
     has_execs: &mut bool,
+    runtime_type: &mut Option<u8>,
 ) {
     let mut chars = line.chars().peekable();
     while let Some(&ch) = chars.peek() {
@@ -1171,12 +1252,7 @@ fn scan_quoted_action_specs(
             if colon_parts.len() >= 3
                 && let Some(t) = action_to_arg_type(colon_parts[2])
             {
-                match t {
-                    trie::ARG_MODE_DIRS_ONLY => *has_dirs = true,
-                    trie::ARG_MODE_PATHS => *has_files = true,
-                    trie::ARG_MODE_EXECS_ONLY => *has_execs = true,
-                    _ => {}
-                }
+                accumulate_runtime_type(t, has_files, has_dirs, has_execs, runtime_type);
             }
 
             // _regex_arguments / _regex_words format: ':tag:desc:action'
@@ -1185,12 +1261,7 @@ fn scan_quoted_action_specs(
                 if parts.len() >= 3
                     && let Some(t) = action_to_arg_type(parts[2])
                 {
-                    match t {
-                        trie::ARG_MODE_DIRS_ONLY => *has_dirs = true,
-                        trie::ARG_MODE_PATHS => *has_files = true,
-                        trie::ARG_MODE_EXECS_ONLY => *has_execs = true,
-                        _ => {}
-                    }
+                    accumulate_runtime_type(t, has_files, has_dirs, has_execs, runtime_type);
                 }
             }
         } else {
@@ -1348,14 +1419,31 @@ fn process_spec_string(spec_str: &str, spec: &mut ArgSpec) {
         return;
     }
 
-    // Flag spec: starts with - or ( (exclusion group)
-    // Extract flag names from patterns like:
-    //   '-o+:desc:_files'  → flag "-o"
-    //   '--output=:desc:_files'  → flag "--output"
-    //   '(-f --flag)'{-f,--flag}':desc:_files' → flags "-f", "--flag"
-    //   But we see the inner part after brace expansion, so we get:
-    //   '-f:desc:_files' and '--flag:desc:_files'
-    if s.starts_with('-') || s.starts_with('(') {
+    // Positional with exclusion group: '(-a -b)N:desc:action'
+    // The ( ... ) is a mutual-exclusion list; after it comes the position digit.
+    if s.starts_with('(') {
+        if let Some(close) = s.find(')') {
+            let after = s[close + 1..].trim_start();
+            if after.starts_with('*') {
+                spec.rest = Some(arg_type);
+                return;
+            }
+            if let Some(fc) = after.chars().next()
+                && fc.is_ascii_digit()
+                && let Ok(pos) = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u32>()
+            {
+                spec.positional.insert(pos, arg_type);
+                return;
+            }
+        }
+    }
+
+    // Flag spec: starts with -
+    if s.starts_with('-') {
         let flags = extract_flags_from_spec(s);
         for flag in flags {
             spec.flag_args.insert(flag, arg_type);
@@ -1838,6 +1926,9 @@ case "$lstate" in
 esac
 "#;
         let spec = parse_arg_spec(content);
+        // ':host:->userhost' is positional 1 → HOSTS
+        assert_eq!(spec.positional.get(&1), Some(&trie::ARG_MODE_HOSTS));
+        // '*::args:->command' is rest → EXECS_ONLY
         assert_eq!(spec.rest, Some(trie::ARG_MODE_EXECS_ONLY));
     }
 
@@ -1898,10 +1989,14 @@ _arguments \
         assert_eq!(spec.rest, Some(trie::ARG_MODE_PIDS));
     }
 
+    fn no_completions() -> HashSet<String> {
+        HashSet::new()
+    }
+
     #[test]
     fn test_well_known_specs_not_empty() {
         let mut specs = HashMap::new();
-        apply_well_known_specs(&mut specs);
+        apply_well_known_specs(&mut specs, &no_completions());
         // Should have added specs for git checkout, docker, kubectl, etc.
         assert!(specs.contains_key("git checkout"));
         assert!(specs.contains_key("git push"));
@@ -1915,9 +2010,27 @@ _arguments \
     }
 
     #[test]
+    fn test_well_known_specs_skipped_for_completion_commands() {
+        let mut specs = HashMap::new();
+        let mut covered = HashSet::new();
+        covered.insert("git".to_string());
+        covered.insert("ssh".to_string());
+        covered.insert("kill".to_string());
+        apply_well_known_specs(&mut specs, &covered);
+        // These have completion files — overrides must not be applied
+        assert!(!specs.contains_key("git checkout"));
+        assert!(!specs.contains_key("git push"));
+        assert!(!specs.contains_key("ssh"));
+        assert!(!specs.contains_key("kill"));
+        // These don't have completion files — overrides should still apply
+        assert!(specs.contains_key("docker run"));
+        assert!(specs.contains_key("curl"));
+    }
+
+    #[test]
     fn test_well_known_docker_specs() {
         let mut specs = HashMap::new();
-        apply_well_known_specs(&mut specs);
+        apply_well_known_specs(&mut specs, &no_completions());
         let docker_run = specs.get("docker run").expect("docker run should have specs");
         assert!(docker_run.flag_args.contains_key("-v"));
         assert!(docker_run.flag_args.contains_key("-u"));
@@ -1926,7 +2039,7 @@ _arguments \
     #[test]
     fn test_well_known_curl_specs() {
         let mut specs = HashMap::new();
-        apply_well_known_specs(&mut specs);
+        apply_well_known_specs(&mut specs, &no_completions());
         let curl = specs.get("curl").expect("curl should have specs");
         assert_eq!(curl.positional.get(&1), Some(&trie::ARG_MODE_URLS));
         assert_eq!(curl.flag_args.get("-o"), Some(&trie::ARG_MODE_PATHS));
@@ -1935,7 +2048,7 @@ _arguments \
     #[test]
     fn test_well_known_kill_specs() {
         let mut specs = HashMap::new();
-        apply_well_known_specs(&mut specs);
+        apply_well_known_specs(&mut specs, &no_completions());
         let kill = specs.get("kill").expect("kill should have specs");
         assert_eq!(kill.positional.get(&1), Some(&trie::ARG_MODE_PIDS));
         assert_eq!(kill.rest, Some(trie::ARG_MODE_PIDS));
@@ -1945,7 +2058,7 @@ _arguments \
     #[test]
     fn test_well_known_ssh_specs() {
         let mut specs = HashMap::new();
-        apply_well_known_specs(&mut specs);
+        apply_well_known_specs(&mut specs, &no_completions());
         let ssh = specs.get("ssh").expect("ssh should have specs");
         assert_eq!(ssh.positional.get(&1), Some(&trie::ARG_MODE_HOSTS));
         assert_eq!(ssh.flag_args.get("-i"), Some(&trie::ARG_MODE_PATHS));
@@ -1956,7 +2069,7 @@ _arguments \
     #[test]
     fn test_well_known_chown_specs() {
         let mut specs = HashMap::new();
-        apply_well_known_specs(&mut specs);
+        apply_well_known_specs(&mut specs, &no_completions());
         let chown = specs.get("chown").expect("chown should have specs");
         assert_eq!(chown.positional.get(&1), Some(&trie::ARG_MODE_USERS));
         assert_eq!(chown.rest, Some(trie::ARG_MODE_PATHS));
@@ -2196,5 +2309,22 @@ subcmds=(
         assert!(!is_internal_completion("git"));
         assert!(!is_internal_completion("docker"));
         assert!(!is_internal_completion("ssh"));
+    }
+
+    #[test]
+    fn test_git_checkout_spec_from_completion_file() {
+        let path = "/usr/share/zsh/5.9/functions/_git";
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return; // skip if file not present
+        };
+        let sub_specs = extract_subcommand_arg_specs("git", &content);
+        let spec = sub_specs.get("git checkout").expect("git checkout spec missing");
+        // The rest arg should resolve as branches (commits), not files
+        assert_eq!(
+            spec.rest,
+            Some(trie::ARG_MODE_GIT_BRANCHES),
+            "git checkout rest should be GIT_BRANCHES, got {:?}",
+            spec.rest
+        );
     }
 }
