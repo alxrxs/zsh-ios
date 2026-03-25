@@ -871,6 +871,12 @@ fn resolve_paths_in_words(
             continue;
         }
 
+        // Bare . and .. are directory literals (e.g. `git add .`); never resolve.
+        if word == "." || word == ".." {
+            result.push(word.clone());
+            continue;
+        }
+
         if word.starts_with('-') {
             result.push(word.clone());
             // Check if this flag consumes the next word as a typed value
@@ -2793,6 +2799,53 @@ mod tests {
             ResolveResult::Passthrough(s) => assert_eq!(s, ""),
             other => panic!("Expected Passthrough, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_dot_and_dotdot_pass_through() {
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        // . and .. are directory literals and must never be prefix-resolved
+        match resolve("ter ap .", &trie, &pins) {
+            ResolveResult::Resolved(s) => assert_eq!(s, "terraform apply ."),
+            other => panic!("Expected Resolved with . unchanged, got {:?}", other),
+        }
+        match resolve("ter ap ..", &trie, &pins) {
+            ResolveResult::Resolved(s) => assert_eq!(s, "terraform apply .."),
+            other => panic!("Expected Resolved with .. unchanged, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_path_command_word_resolved() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("zsh-ios-test-cmdword");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("uninstall.sh"), "").unwrap();
+        fs::write(dir.join("install.sh"), "").unwrap();
+
+        let trie = build_test_trie();
+        let pins = Pins::default();
+        let abs = dir.to_str().unwrap().to_string();
+
+        // Absolute path prefix: /tmp/.../unin → /tmp/.../uninstall.sh
+        let input = format!("{}/unin", abs);
+        let expected = format!("{}/uninstall.sh", abs);
+        match resolve(&input, &trie, &pins) {
+            ResolveResult::Resolved(s) => assert_eq!(s, expected),
+            other => panic!("Expected Resolved for abs path cmd word, got {:?}", other),
+        }
+
+        // Absolute path prefix for the other script
+        let input2 = format!("{}/ins", abs);
+        let expected2 = format!("{}/install.sh", abs);
+        match resolve(&input2, &trie, &pins) {
+            ResolveResult::Resolved(s) => assert_eq!(s, expected2),
+            other => panic!("Expected Resolved for abs path cmd word, got {:?}", other),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
