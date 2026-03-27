@@ -410,6 +410,7 @@ fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>, cmds_with_comple
         ("git fetch", &[(1, ARG_MODE_GIT_REMOTES)], None, &[]),
         ("git tag", &[(1, ARG_MODE_GIT_TAGS)], None, &[]),
         ("git stash", &[], None, &[]),
+        ("git mv", &[(1, ARG_MODE_GIT_FILES), (2, ARG_MODE_PATHS)], None, &[]),
         ("git rm", &[], Some(ARG_MODE_GIT_FILES), &[]),
         (
             "git restore",
@@ -659,7 +660,11 @@ fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>, cmds_with_comple
         // populated by `if (( words[(I)-d] ))` — a variable the parser never
         // resolves. The parser CAN extract `-b → branches` from `_git-checkout`
         // because that spec is a literal string inside `_arguments`.
-        if !has_completions {
+        // Positional overrides are gap-fill for all commands (with or without
+        // completions). The parser stores bare `:desc:action` positionals as
+        // `spec.rest` rather than numbered slots, so per-position well-known
+        // specs are needed to fill in what the parser can't distinguish.
+        {
             let spec = specs.entry(cmd.to_string()).or_default();
             for &(pos, arg_type) in positional {
                 let existing = spec.positional.get(&pos).copied();
@@ -667,10 +672,14 @@ fn apply_well_known_specs(specs: &mut HashMap<String, ArgSpec>, cmds_with_comple
                     spec.positional.insert(pos, arg_type);
                 }
             }
-            if let Some(r) = rest
-                && (spec.rest.is_none() || spec.rest == Some(ARG_MODE_PATHS))
-            {
-                spec.rest = Some(r);
+            // Rest override only for commands without a completion file —
+            // the parser handles rest for commands that have one.
+            if !has_completions {
+                if let Some(r) = rest
+                    && (spec.rest.is_none() || spec.rest == Some(ARG_MODE_PATHS))
+                {
+                    spec.rest = Some(r);
+                }
             }
         }
 
@@ -1060,20 +1069,11 @@ fn extract_state_arm_action(arm: &str) -> Option<StateAction> {
         }
     }
 
-    // Priority 3: known function names → typed arg mode
-    if let Some(t) = action_to_arg_type(arm) {
+    // Priority 3: detect_type_in_block scans every line and combines all types
+    // (handles _alternative blocks with mixed __git_cached_files + _directories → PATHS,
+    // plain _files/_directories, direct function calls, quoted action specs, etc.)
+    if let Some(t) = detect_type_in_block(arm) {
         return Some(StateAction::ArgType(t));
-    }
-
-    // Priority 4: _files / _directories shorthand
-    if arm.contains("_files") {
-        return Some(StateAction::ArgType(trie::ARG_MODE_PATHS));
-    }
-    if arm.contains("_directories") {
-        return Some(StateAction::ArgType(trie::ARG_MODE_DIRS_ONLY));
-    }
-    if arm.contains("_normal") || arm.contains("_command_names") {
-        return Some(StateAction::ArgType(trie::ARG_MODE_EXECS_ONLY));
     }
 
     None
@@ -2248,7 +2248,10 @@ fn parse_arg_spec(content: &str) -> ArgSpec {
             if let Some(action) = state_actions.get(&state_name) {
                 match (kind, action.clone()) {
                     (StateRefKind::Rest, StateAction::ArgType(t)) => {
-                        if spec.rest.is_none() { spec.rest = Some(t); }
+                        // `*:: :->state` is an explicit rest spec — always override.
+                        // A bare `:desc:action` may have wrongly pre-populated spec.rest;
+                        // the state handler is the authoritative rest type.
+                        spec.rest = Some(t);
                     }
                     (StateRefKind::Rest, StateAction::CallProgram(tag, argv)) => {
                         spec.rest_call_program.get_or_insert((tag, argv));
@@ -2281,7 +2284,7 @@ fn parse_arg_spec(content: &str) -> ArgSpec {
                 // Fallback: plain u8 type from detect_type_in_block
                 match kind {
                     StateRefKind::Rest => {
-                        if spec.rest.is_none() { spec.rest = Some(arg_type); }
+                        spec.rest = Some(arg_type);
                     }
                     StateRefKind::Positional(pos) => {
                         spec.positional.entry(pos).or_insert(arg_type);
@@ -3325,15 +3328,25 @@ _arguments \
         covered.insert("kill".to_string());
         apply_well_known_specs(&mut specs, &covered);
 
-        // Positional/rest specs must not be added for covered commands (the
-        // parser handles those from the completion file).
-        // git checkout pos-1 = GIT_BRANCHES comes from well-known; it must be
-        // absent so the parser's result is the sole source of truth.
+        // Positional gap-fill IS now applied even for covered commands.
+        // The parser stores bare `:desc:action` specs as `spec.rest` instead of
+        // numbered slots, so per-position well-known specs are needed to correct
+        // cases like `git mv` where pos-2 is a destination path, not a git file.
+        // git mv: pos-1 = GIT_FILES (source), pos-2 = PATHS (destination).
+        let mv_spec = specs.get("git mv").expect("git mv spec should be added");
+        assert_eq!(
+            mv_spec.positional.get(&1).copied(),
+            Some(trie::ARG_MODE_GIT_FILES),
+            "git mv pos-1 should be GIT_FILES"
+        );
+        assert_eq!(
+            mv_spec.positional.get(&2).copied(),
+            Some(trie::ARG_MODE_PATHS),
+            "git mv pos-2 should be PATHS (destination)"
+        );
+
+        // Rest is still NOT injected for covered commands — the parser owns that.
         if let Some(spec) = specs.get("git checkout") {
-            assert!(
-                spec.positional.is_empty(),
-                "positional specs must not be injected for covered 'git'"
-            );
             assert!(spec.rest.is_none(), "rest must not be injected for covered 'git'");
         }
 
@@ -3346,15 +3359,12 @@ _arguments \
         let co_spec = specs.get("git checkout").expect("git checkout flag specs should be added");
         assert!(co_spec.flag_args.contains_key("-b"), "-b should be supplemented");
 
-        // ssh/kill have flag overrides so entries ARE created, but
-        // positional/rest are not injected for covered commands.
-        let ssh_spec = specs.get("ssh").expect("ssh flag specs should be added");
-        assert!(ssh_spec.flag_args.contains_key("-i"), "ssh -i should be supplemented");
-        assert!(ssh_spec.positional.is_empty(), "ssh positional must not be injected");
+        // kill: flag and positional overrides are applied; rest is NOT injected for covered.
         let kill_spec = specs.get("kill").expect("kill -s spec should be added");
         assert!(kill_spec.flag_args.contains_key("-s"), "kill -s should be supplemented");
-        assert!(kill_spec.positional.is_empty(), "kill positional must not be injected");
-        assert!(kill_spec.rest.is_none(), "kill rest must not be injected");
+        assert_eq!(kill_spec.positional.get(&1).copied(), Some(trie::ARG_MODE_PIDS),
+            "kill pos-1 should be PIDS");
+        assert!(kill_spec.rest.is_none(), "kill rest must not be injected for covered");
 
         // Commands without completion files are fully covered as before
         assert!(specs.contains_key("docker run"));
